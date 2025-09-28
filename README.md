@@ -19,7 +19,7 @@ The code simulates transmission, channel distortion, and decoding using the Vite
   - `N = 10μ`  
 
 ## File Description
-- **Main Script (`.m`)**  
+- **Main Script (`.mlx`)**  
   - Generates transmitted and received signals.  
   - Runs trellis diagram visualization.  
   - Performs Monte Carlo simulations.  
