@@ -1,0 +1,311 @@
+% ============================
+% VITERBI DECODING SIMULATION
+% ============================
+
+% Channel filter coefficients (FIR filter with memory mu=2)
+A = 1/sqrt(2)*[0.6 -1 0.8];     
+mu = length(A)-1;               % channel memory (number of delay elements)
+
+% Channel transfer function in z-domain
+F_z = tf(A,1,1,"variable","z^-1");
+
+% Starting index for initial state
+initial_index = 1;
+
+% Symbol alphabet (4-PAM modulation)
+symbols = [-3 -1 1 3]; 
+M = length(symbols);             % modulation order
+
+% Number of transmitted time steps (symbols)
+numTimeSteps = 1e5;
+
+% -------------------------------
+% Generate all possible channel states (size M^mu)
+% Since mu=2, there are 4^2 = 16 possible states
+[x,y] = meshgrid(symbols);
+x = reshape(x,[],1);
+y = reshape(y,[],1);
+state = [x,y];                   % each row represents one state
+
+% -------------------------------
+% Generate random input data symbols with guard symbols
+data = cat(1, ones(mu,1), randi([1,M],numTimeSteps,1), ones(mu,1));
+tx_sig = symbols(data);          % map indices to actual PAM symbols
+
+% -------------------------------
+% Add channel noise
+SNR_db = 0:2:10;                 % SNR values in dB
+s_z = conv(tx_sig,A);            % convolve with channel impulse response
+Snr = 10.^(SNR_db/10);           % linear scale
+Eb = norm(symbols);              % symbol energy
+N0 = Eb./Snr;                    % noise spectral density
+w_z = s_z + sqrt(0.1*N0'/2).*(randn(size(s_z))); % noisy received signal
+w_z = w_z(:,mu+1:numTimeSteps+2*mu-3);
+
+% -------------------------------
+% Plot State Diagram (custom function below)
+plotStateDiagram(state, symbols, A)
+
+%% ============================
+% TRELLIS DIAGRAM CONSTRUCTION
+% ============================
+
+N = 6;   % number of time steps for trellis plotting
+
+% Generate input sequence for trellis demonstration
+data = cat(1,randi([1,M],N-mu,1),ones(mu,1));
+input = symbols(data);
+S_z = conv(input,A);
+Snr_db = 5;                      
+output = awgn(S_z,Snr_db);       % received noisy sequence
+
+% Variables for storing state transitions and path costs
+total_state = zeros(M^mu,mu+1,M);
+cost_value = zeros(M^mu,1,M);
+cost_func  = zeros(M^mu,1,M);
+min_cost   = zeros(N,M^mu,M);
+idx        = zeros(N,M^mu,M);
+
+% Loop over trellis stages
+for t = 1:N
+    % Initialize valid states
+    if(t==1)
+        valid_present_state = repelem(state(initial_index,:),M^mu,1);
+    else
+        valid_present_state = valid_next_state;
+    end
+    
+    % Constrain final stages to fixed input (tail bits)
+    if t==N-2||t==N-1
+        valid_input = repmat(symbols(1),M^mu,1);
+    else
+        valid_input = repmat(symbols',M,1);
+    end
+    
+    % Next state construction
+    valid_next_state = sort(valid_present_state(:,1));
+    valid_next_state = [valid_input,valid_next_state(:,1)];
+    
+    % Encode states to numeric index
+    mapped_states = valid_present_state(:,1)*M + valid_present_state(:,2);
+    
+    % Loop through all states and possible inputs
+    for i=1:M^mu
+        for j=1:M
+            % Form complete state [input, prev_state]
+            total_state(i,:,j) = [valid_input(j),valid_present_state(i,:)];
+            
+            % Output symbol from channel
+            cost_value(i,1,j) = sum(A.*total_state(i,:,j));
+            
+            % Plot trellis transition (arrow + label)
+            if(t~=N)
+                plotted = M*total_state(i,2,j)+total_state(i,3,j);
+                dl = M*total_state(i,1,j)+total_state(i,2,j)-plotted;
+                
+                quiver(t,plotted,1,dl,0,"MaxHeadSize",0.1,"Color","k")
+                textPoint = (0.75*[t,plotted] + 0.25*[t+1,plotted+dl]);
+                transition_label = sprintf('%d/%.2f', valid_input(j), cost_value(i,1,j)); 
+                text(textPoint(1), textPoint(2), transition_label, ...
+                     'FontSize', 8, 'Color', "w");
+                hold on
+            end
+        end
+    end
+    
+    % Plot states at current stage
+    plot(t*ones(length(mapped_states),1),mapped_states,"o", ...
+        "MarkerSize",15,"MarkerFaceColor","cyan")
+    text(t*ones(length(mapped_states),1),mapped_states, ...
+         num2str([valid_present_state(:,1), valid_present_state(:,2)]), ...
+         'HorizontalAlignment','center','FontSize',7);
+    xlim([0 N+1])
+    ylim([min(((M+1)*symbols))-1 max((M+1)*symbols)+1])
+end
+hold off
+set(gca,"color","w")
+
+%% ============================
+% MONTE-CARLO SIMULATION
+% SER vs SNR curves
+% ============================
+
+for j=1:length(SNR_db)
+    initial_state = state(initial_index,:);
+    
+    % --- Run with different block sizes ---
+    N1=mu; N2=2*mu; N3=5*mu; N4=7*mu; N5=10*mu;
+    
+    % Viterbi decoding for different N
+    % (function Decode defined later)
+    
+    % Case 1: N=mu
+    min_cost1=inf(1,M^mu); min_cost1(1)=0;
+    for i=1:int32(length(w_z)/N1)-1
+        [decoded_signal1(1+mu*(i-1):mu*(i-1)+N1),min_cost1] = ...
+            Decode(state,w_z(j,1+(i-1)*mu:end),N1,A,symbols,min_cost1);
+    end
+    errors1 = sum(decoded_signal1 ~= tx_sig(mu+(1:length(decoded_signal1))));
+    SER1(j) = errors1/numTimeSteps;
+    
+    % Case 2: N=2*mu
+    min_cost2=inf(1,M^mu); min_cost2(1)=0;
+    for i=1:int32(length(w_z)/N2)-1
+        [decoded_signal2(1+mu*(i-1):mu*(i-1)+N2),min_cost2] = ...
+            Decode(state,w_z(j,1+(i-1)*mu:end),N2,A,symbols,min_cost2);
+    end
+    errors2 = sum(decoded_signal2(2:2:end) ~= tx_sig(mu+(2:2:length(decoded_signal2))));
+    SER2(j) = errors2/numTimeSteps;
+    
+    % Case 3: N=5*mu
+    min_cost3=inf(1,M^mu); min_cost3(1)=0;
+    for i=1:int32(length(w_z)/N3)-1
+        [decoded_signal3(1+mu*(i-1):mu*(i-1)+N3),min_cost3] = ...
+            Decode(state,w_z(j,1+(i-1)*mu:end),N3,A,symbols,min_cost3);
+    end
+    errors3 = sum(decoded_signal3(3:3:end) ~= tx_sig(mu+(3:3:length(decoded_signal3))));
+    SER3(j) = errors3/numTimeSteps;
+    
+    % Case 4: N=7*mu
+    min_cost4=inf(1,M^mu); min_cost4(1)=0;
+    for i=1:int32(length(w_z)/N4)-1
+        [decoded_signal4(1+mu*(i-1):mu*(i-1)+N4),min_cost4] = ...
+            Decode(state,w_z(j,1+(i-1)*mu:end),N4,A,symbols,min_cost4);
+    end
+    errors4 = sum(decoded_signal4(4:4:end) ~= tx_sig(mu+(4:4:length(decoded_signal4))));
+    SER4(j) = errors4/numTimeSteps;
+    
+    % Case 5: N=10*mu
+    min_cost5=inf(1,M^mu); min_cost5(1)=0;
+    for i=1:int32(length(w_z)/N5)-1
+        [decoded_signal5(1+mu*(i-1):mu*(i-1)+N5),min_cost5] = ...
+            Decode(state,w_z(j,1+(i-1)*mu:end),N5,A,symbols,min_cost5);
+    end
+    errors5 = sum(decoded_signal5(5:5:end) ~= tx_sig(mu+(5:5:length(decoded_signal5))));
+    SER5(j) = errors5/numTimeSteps;
+end
+
+% -------------------------------
+% Plot SER vs SNR results
+figure;
+semilogy(SNR_db,SER1,"b")
+hold on
+semilogy(SNR_db,SER2,"g")
+semilogy(SNR_db,SER3,"r")
+semilogy(SNR_db,SER4,"m")
+semilogy(SNR_db,SER5,"k")
+hold off
+legend("mu","2*mu","5*mu","7*mu","10mu")
+grid on
+
+%% ============================
+% VITERBI DECODER FUNCTION
+% ============================
+function [decoded_signal,m_cost] = Decode(state,output,N,A,symbols,m)
+    M = length(symbols);
+    mu = length(A)-1;
+    min_cost = m;                       % path cost initialization
+    previous_state = zeros(M^mu,2,N);   % store survivor paths
+    
+    % Loop through N trellis stages
+    for t=1:N
+        % Build possible state transitions
+        total_state = [repmat(symbols',M^mu,1), repelem(state,M,1)];
+        [~,idx] = sort(total_state(:,1));
+        total_state = total_state(idx,:);
+        
+        % Compute channel output for each transition
+        cost_value = sum(A.*total_state,2);
+        cost_value = reshape(cost_value,M,[]);
+        
+        % Compute accumulated path cost
+        prev_cost = reshape(repmat(min_cost,1,M),M,[]);
+        cost_func = prev_cost + ((cost_value - output(t)).^2);
+        
+        % Choose minimum cost path
+        [min_cost,idx] = min(cost_func);
+        for i=1:M^mu
+            previous_state(i,:,t) = total_state(idx(i)+(i-1)*M,[2,3]);
+        end
+        if t==mu
+            m_cost = min_cost;  % store cost after first mu steps
+        end
+    end
+    
+    % Traceback: recover decoded sequence
+    [~,idx] = min(min_cost);
+    decoding_signal = zeros(N,1);
+    for i=N:-1:1
+        p_state = state(idx,:);
+        val = previous_state(idx,:,i);
+        idx = find(state(:,1)==val(1) & state(:,2)==val(2));
+        decoding_signal(i) = p_state(1);
+    end
+    decoded_signal = decoding_signal;
+end
+
+%% ============================
+% STATE DIAGRAM PLOTTING FUNCTION
+% ============================
+function plotStateDiagram(state, symbols, A)
+    mu = length(A) - 1; % Delay elements
+    M = length(symbols); % Number of symbols
+
+    % Initialize figure
+    state_diagram = figure;
+    ax = axes(state_diagram);
+    set(ax, "XTick", [], "YTick", [], "XTickLabel", [], "YTickLabel", []);
+    set(get(ax, 'XAxis'), 'Visible', 'off');
+    set(get(ax, 'YAxis'), 'Visible', 'off');
+    
+    % Plot the states (nodes of trellis)
+    plot(state(:, 1), state(:, 2), "o", "MarkerSize", 15, "MarkerFaceColor", "cyan");
+    text(state(:, 1), state(:, 2), num2str([state(:, 1), state(:, 2)]), ...
+        'HorizontalAlignment', 'center', 'FontSize', 7);
+    hold on;
+    box off;
+
+    % Generate inputs, states, and transitions
+    input = reshape(repelem(symbols, M^mu, 1), [], 1, M);
+    s = reshape(repmat(state, 1, M), [], 2, M);
+    next_state = cat(2, input, s(:, 1, :));
+    dl = (next_state - s);
+
+    % Loop over all states and inputs to plot transitions
+    for i = 1:M^mu
+        for j = 1:M
+            % Channel output for each transition
+            output = A(1)*input(i,1,j) + A(2)*s(i,1,j) + A(3)*s(i,2,j);
+            transition_label = sprintf('%d/%.2f', input(i,1,j), output);
+
+            % Color-code transitions
+            switch j
+                case 1, colour="r";
+                case 2, colour="w";
+                case 3, colour="g";
+                case 4, colour="b";
+            end
+
+            % Draw transition arrow
+            if dl(i,1,j) ~= 0 || dl(i,2,j) ~= 0
+                quiver(s(i,1,j), s(i,2,j), dl(i,1,j), dl(i,2,j), 0, ...
+                       "MaxHeadSize", 0.1, "Color", colour);
+                textPoint = (0.75*s(i,:,j) + 0.25*next_state(i,:,j));
+                text(textPoint(1), textPoint(2), transition_label, ...
+                     'FontSize', 8, 'Color', colour);
+            else
+                % Draw self-loops
+                loop_radius = 0.4;
+                offset = [0.3, 0.3];
+                loop_x = loop_radius*cos(linspace(-5*pi/8,9*pi/8,50)) + s(i,1,j) + offset(1);
+                loop_y = loop_radius*sin(linspace(-5*pi/8,9*pi/8,50)) + s(i,2,j) + offset(2);
+                plot(loop_x, loop_y, 'Color', "y", "LineWidth", 1.5);
+                text(s(i,1,j)+offset(1)/2, s(i,2,j)+offset(2)/2, ...
+                     transition_label, "FontSize", 8, "Color", "b");
+            end
+        end
+    end
+
+    hold off;
+    set(gca,"color","w");
+end
